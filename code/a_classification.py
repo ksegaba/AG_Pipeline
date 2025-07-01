@@ -10,6 +10,8 @@ June 5, 2025: [BUG FIX] I added f1_macro for multiclass classification in AutoGl
 Also moved the conversion of boolean labels to outside the if/else block. Also
 implemented downsampling with imblearn.
 
+June 30, 2025: calculate additional performance metrics for the stacked ensemble model predictions from autogluon
+
 Binary Classification with XGBoost or AutoGluon
 
 Required Inputs
@@ -614,7 +616,7 @@ if __name__ == "__main__":
     X.set_index(X.columns[0], inplace=True)
     
     if X.isnull().values.any():
-        if args.dropna == "y":
+        if args.drop_na == "y":
             start_dim = X.shape
             X = X.dropna(axis=0)
             print("Dropping rows with NAs... dim change: %s to %s."
@@ -630,7 +632,7 @@ if __name__ == "__main__":
         y = Y.loc[:, args.y_name]
         
         if y.isna().any():
-            if args.dropna == 'y':
+            if args.drop_na == 'y':
                 print("Removing rows with missing labels")
                 start_dim = len(y)
                 start_dim_X = len(X)
