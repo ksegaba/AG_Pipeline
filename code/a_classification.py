@@ -94,7 +94,8 @@ from sklearn.metrics import f1_score, matthews_corrcoef, accuracy_score
 from sklearn.model_selection import cross_val_predict, cross_validate
 from sklearn.model_selection import LeaveOneOut, StratifiedKFold, train_test_split
 from autogluon.tabular import TabularPredictor
-sys.path.append('/mnt/research/glbrc_group/shiulab/kenia/Shiu_Lab/AutoGluon/code')
+sys.path.append(
+    '/mnt/research/glbrc_group/shiulab/kenia/Shiu_Lab/AutoGluon/code')
 
 
 def parse_args():
@@ -139,11 +140,13 @@ def parse_args():
     dp_group.add_argument(
         "-test", help="path to file of test set instances", default="", type=str)
     dp_group.add_argument(
+        "-y_split", help="column name in Y designating train/test samples", default="", type=str)
+    dp_group.add_argument(
         "-size", help="size of test set (default is 1/11 of the data)", default=1/11, type=float)
     dp_group.add_argument(
         "-drop_na", help="whether to drop rows with missing values (y/n)",
         default="n")  # default is 'n' to keep all rows
-    
+
     # Optional feature selection arguments
     fs_group = parser.add_argument_group(title="Optional Feature Selection")
     fs_group.add_argument(
@@ -590,31 +593,38 @@ def run_autogluon(X_train, X_test, y_train, y_test, label, path, prefix):
     X_test_norm.insert(0, label, y_test[X_test_norm.index])
 
     # Model training
-    if y_train.nunique() == 2: # binary classification
+    if y_train.nunique() == 2:  # binary classification
         predictor = TabularPredictor(
-            label=label, eval_metric='f1', path=f'{path}/{prefix}').fit(X_train_norm)
-    else:
+            label=label, eval_metric='f1', path=f'{path}/{prefix}').\
+            fit(X_train_norm)
+    else:  # multiclass classification
         predictor = TabularPredictor(
-            label=label, eval_metric='f1_macro', path=f'{path}/{prefix}').fit(X_train_norm)
-    
+            label=label, eval_metric='f1_macro', path=f'{path}/{prefix}').\
+            fit(X_train_norm)
+
     importance = predictor.feature_importance(
         X_test_norm)  # permutation importance
     importance.to_csv(f'{prefix}_IMPORTANCE.csv')
 
     # Evaluation
     y_pred = predictor.predict(X_test_norm.drop(columns=[label]))
-    print(y_pred)
-    predictor.evaluate(X_test_norm, silent=True)
-    predictor.leaderboard(X_test_norm).to_csv(f'{prefix}_RESULTS.csv')
+    y_pred.to_csv(f'{prefix}_PREDICTIONS.csv')
+    results = predictor.evaluate(
+        X_test_norm, silent=True, auxiliary_metrics=True, detailed_report=True)
+    print("Evaluation results:", results)
+    lb = predictor.leaderboard(data=X_test_norm,
+                               extra_metrics=['f1', 'f1_weighted', 'roc_auc',
+                                              'precision', 'recall'])
+    lb.to_csv(f'{prefix}_RESULTS.csv')
 
 
 if __name__ == "__main__":
     args = parse_args()
 
-    # Read in data
+    print("Reading in data")
     X = dt.fread(args.X).to_pandas()  # feature table
     X.set_index(X.columns[0], inplace=True)
-    
+
     if X.isnull().values.any():
         if args.drop_na == "y":
             start_dim = X.shape
@@ -627,10 +637,10 @@ if __name__ == "__main__":
         y = X.loc[:, args.y_name]
         X.drop(columns=args.y_name, inplace=True)
     else:
-        Y = dt.fread(args.Y).to_pandas() # fread converts 0/1 to True/False
+        Y = dt.fread(args.Y).to_pandas()  # fread converts 0/1 to True/False
         Y.set_index(Y.columns[0], inplace=True)
         y = Y.loc[:, args.y_name]
-        
+
         if y.isna().any():
             if args.drop_na == 'y':
                 print("Removing rows with missing labels")
@@ -643,15 +653,19 @@ if __name__ == "__main__":
 
     assert X.index.equals(y.index), "X and y must have the same index!"
 
-    if y.nunique() == 2: # binary classification; convert boolean to int
-        y = y.astype("int") # ensure True/False are encoded as 0/1
+    if y.nunique() == 2:  # binary classification; convert boolean to int
+        y = y.astype("int")  # ensure True/False are encoded as 0/1
 
     # Filter out features not in the given feat file - default: keep all
     if args.feat != "all":
         print("Using subset of features from: %s" % args.feat)
         with open(args.feat) as f:
-            features = f.read().strip().splitlines()
-        X = X.loc[:, features]
+            features = f.read().strip().strip('"').strip("'").splitlines()
+        try:
+            X = X.loc[:, features]
+        except:
+            features = pd.read_csv(args.feat, header=None)
+            X = X.loc[:, features[0]]
         print(f"New dimensions: {X.shape}")
 
     if len(args.feat_list) > 0:
@@ -661,6 +675,7 @@ if __name__ == "__main__":
 
     # Train-test split
     if args.test != '':
+        print("Using test set from:", args.test)
         test = dt.fread(args.test, header=False).to_pandas()  # test instances
         if len(test.columns) > 1:  # Features were included in the test file
             # re-read the test file, include header
@@ -670,15 +685,23 @@ if __name__ == "__main__":
             X_train = X.copy(deep=True)
             y_test = test.loc[:, args.y_name]
             X_test = test.drop(columns=args.y_name).astype(int)
-            del X, y
         else:
             X_train = X.loc[~X.index.isin(test.iloc[:, 0])]
             X_test = X.loc[test.iloc[:, 0]]
             y_train = y.loc[~y.index.isin(test.iloc[:, 0])]
             y_test = y.loc[test.iloc[:, 0]]
     else:
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=args.size, random_state=2305, stratify=y)
+        print("Splitting data into train and test sets...")
+        if args.y_split == '':
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=args.size, random_state=2305, stratify=y)
+        else:
+            Y_train = Y.loc[Y[args.y_split] == 'train']
+            Y_test = Y.loc[Y[args.y_split] == 'test']
+            y_train = y.loc[y.index.isin(Y_train.index)]
+            y_test = y.loc[y.index.isin(Y_test.index)]
+            X_train = X.loc[y.index, :]
+            X_test = X.loc[y.index, :]
 
     # Ensure rows are in the same order
     X_train = X_train.loc[y_train.index, :]
@@ -686,6 +709,8 @@ if __name__ == "__main__":
 
     print(X_train.shape, X_test.shape, y_train.shape, y_test.shape)
     print(y_train.value_counts(), y_test.value_counts())
+    assert X_train.shape[0] == y_train.shape[0], "X_train and y_train must have the same number of rows!"
+    assert X_test.shape[0] == y_test.shape[0], "X_test and y_test must have the same number of rows!"
 
     # Train the model with an imbalanced dataset
     if args.bal == 'n':
