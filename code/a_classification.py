@@ -46,6 +46,9 @@ Required Inputs
 	-tag    Feature types/identifier for distinguising runs in results file
 	-plot   Plot feature importances and predictions (default is t)
 
+    # Optional arguments for AutoGluon
+    -hyperparams JSON file with hyperparameters for specific algorithms, e.g., {'GBM': {param1:[<value1>, <value2>]}, 'CAT': {}}
+
 XGBoost outputs for each training repetition (prefixed with <prefix>_)
 	_model_rep_*.pkl         XGBoost model
 	_top20_rep_*.pdf          Plot of top 20 features' importance scores
@@ -183,6 +186,13 @@ def parse_args():
     xgb_group.add_argument(
         "-plot", help="plot feature importances and predictions (t/f)",
         default="t")
+    
+    # Optional arguments for AutoGluon
+    ag_group = parser.add_argument_group(title="Optional AutoGluon Arguments")
+    ag_group.add_argument(
+        "-hyperparams",
+        help="JSON file with hyperparameters for specific algorithms, e.g., {'GBM': {param1:[<value1>, <value2>]}, 'CAT': {}}",
+        default="")
 
     # Help
     if len(sys.argv) == 1:
@@ -573,14 +583,26 @@ def save_xgb_results(results_cv, results_test, args, tag, run_time, nsamp, nfeat
     out.close()
 
 
-def run_autogluon(X_train, X_test, y_train, y_test, label, path, prefix):
-    '''Run AutoGluon for binary classification.'''
+def run_autogluon(X_train, X_test, y_train, y_test, label, path, prefix, hparams_file=""):
+    '''Run AutoGluon for classification.'''
 
     # Directory to save models and other output to
     if not os.path.exists(f'{path}/{prefix}'):
         os.makedirs(f'{path}/{prefix}')
 
     os.chdir(f'{path}/{prefix}')
+
+    # If JSON is provided, load specific hyperparameters in file for designated 
+    # algorithm types run in autogluon. This is OPTIONAL. If no JSON is provided,
+    # AutoGluon default hyperparameters will be used.
+    hparams = {}
+    if hparams_file and os.path.exists(hparams_file):
+        import json # kept this here, did not see the need to import it at the top - BB
+        with open(hparams_file, 'r') as f:
+            hparams = json.load(f)
+            print(f"Hyperparameters were found for algorithms:{list(hparams.keys())}. All other algorithms will use AutoGluon defaults.")
+    else: 
+        print("No hyperparameter JSON file was provided. AutoGluon defaults will be used for all algorithms.")
 
     # Normalize training and testing datasets
     X_train_norm = pd.DataFrame(MinMaxScaler().fit_transform(X_train),
@@ -596,15 +618,35 @@ def run_autogluon(X_train, X_test, y_train, y_test, label, path, prefix):
     if y_train.nunique() == 2:  # binary classification
         predictor = TabularPredictor(
             label=label, eval_metric='f1', path=f'{path}/{prefix}').\
-            fit(X_train_norm)
+            fit(X_train_norm, hyperparameters=hparams if hparams else 'default')
     else:  # multiclass classification
         predictor = TabularPredictor(
             label=label, eval_metric='f1_macro', path=f'{path}/{prefix}').\
-            fit(X_train_norm)
+            fit(X_train_norm, hyperparameters=hparams if hparams else 'default')
+    
+    # Feature importance calc for each feature (ensemble-level importance)
+    # Training set importance
+    importance_train = predictor.feature_importance(
+        X_train_norm)  # Permutation importance
+    importance_train.to_csv(f'{prefix}_TRAINSET_IMPORTANCE.csv')
 
-    importance = predictor.feature_importance(
-        X_test_norm)  # permutation importance
-    importance.to_csv(f'{prefix}_IMPORTANCE.csv')
+    # Test set importance
+    importance_test = predictor.feature_importance(
+        X_test_norm)  # Permutation importance
+    importance_test.to_csv(f'{prefix}_TESTSET_IMPORTANCE.csv')
+
+    # Get model-specific importance where possible
+    print("Getting model-specific feature importances.")
+    for model_name in predictor.model_names():
+        try:
+            model_importance_train = predictor.feature_importance(X_train_norm, model=model_name)
+            model_importance_train.to_csv(f'models/{model_name}/{prefix}_{model_name}_TRAINSET_IMPORTANCE.csv')
+            print(f'{model_name} training set importance calculated and saved.')
+            model_importance_test = predictor.feature_importance(X_test_norm, model=model_name)
+            model_importance_test.to_csv(f'models/{model_name}/{prefix}_{model_name}_TESTSET_IMPORTANCE.csv')
+            print(f'{model_name} test set importance calculated and saved.')
+        except Exception as e:
+            print(f'Unable to get importance for {model_name}: {e}')
 
     # Evaluation
     y_pred = predictor.predict(X_test_norm.drop(columns=[label]))
@@ -617,6 +659,7 @@ def run_autogluon(X_train, X_test, y_train, y_test, label, path, prefix):
                                               'precision', 'recall'])
     lb.to_csv(f'{prefix}_RESULTS.csv')
 
+    print(f"Models trained: {predictor.model_names()}")
 
 if __name__ == "__main__":
     args = parse_args()
@@ -739,7 +782,9 @@ if __name__ == "__main__":
 
                 if args.alg == 'autogluon':
                     run_autogluon(X_train_fs, X_test_fs, y_train, y_test,
-                                  args.y_name, args.save, f'{args.prefix}_top_{len(features)}')
+                                  args.y_name, args.save, 
+                                  f'{args.prefix}_top_{len(features)}',
+                                  args.hyperparams)
 
         else:  # No feature selection
             if args.alg == 'xgboost':
@@ -754,7 +799,7 @@ if __name__ == "__main__":
 
             if args.alg == 'autogluon':
                 run_autogluon(X_train, X_test, y_train, y_test, args.y_name,
-                              args.save, args.prefix)
+                              args.save, args.prefix, args.hyperparams)
 
     # Train the model with a balanced training dataset
     if args.bal == 'y':
@@ -795,7 +840,8 @@ if __name__ == "__main__":
                     if args.alg == 'autogluon':
                         run_autogluon(X_train_bal_fs, X_test_fs, y_train_bal,
                                       y_test, args.y_name, args.save,
-                                      f'{args.prefix}_balanced_{b}_top_{len(features)}')
+                                      f'{args.prefix}_balanced_{b}_top_{len(features)}',
+                                      args.hyperparams)
 
             else:  # No feature selection
                 if args.alg == 'xgboost':
@@ -812,4 +858,5 @@ if __name__ == "__main__":
 
                 if args.alg == 'autogluon':
                     run_autogluon(X_train_bal, X_test, y_train_bal, y_test,
-                                  args.y_name, args.save, f'{args.prefix}_balanced_{b}')
+                                  args.y_name, args.save, 
+                                  f'{args.prefix}_balanced_{b}', args.hyperparams)
